@@ -1,0 +1,23 @@
+# GRPO + DAPO 复现项目依赖（阶段 2 在 macOS 15 / Intel x86_64 / Python 3.10 上验证）
+#
+# 平台说明：
+# - macOS Intel 上 PyTorch 官方最后支持的版本为 2.2.2，且必须搭配 numpy<2；
+# - 若要迁移到云 GPU（Linux + NVIDIA），请按 CUDA 版本重装 torch，例如：
+#     pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   其余依赖版本可作为参考。
+# - sentencepiece 0.2.x 在 macOS x86_64 上无预编译 wheel，故固定为 0.1.99。
+
+torch==2.2.2
+numpy==1.26.4
+transformers==4.46.3
+datasets==5.0.1
+peft==0.13.2
+accelerate==1.1.1
+pandas==2.3.3
+matplotlib==3.10.9
+sentencepiece==0.1.99
+safetensors==0.8.0
+tqdm==4.70.1
+scipy==1.15.3
+tensorboard==2.21.0
+pyyaml==6.0.3

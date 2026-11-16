@@ -1,0 +1,23 @@
+# 模型权重（体积大，不纳入版本控制）
+models/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
+
+# 运行产物
+outputs/
+wandb/
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+*.egg-info/
+
+# 本地工具与系统文件
+.claude/settings.local.json
+.DS_Store

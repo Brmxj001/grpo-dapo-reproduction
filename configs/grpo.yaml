@@ -1,0 +1,54 @@
+# Vanilla GRPO 配置（实验 E1 基线）
+# 公式与实现约定见 docs/algorithm_spec.md
+
+defaults:
+  - model.yaml
+  - data.yaml
+
+experiment:
+  id: E1
+  name: vanilla_grpo
+  description: Vanilla GRPO（组内相对优势 + PPO 裁剪 + k3 KL）
+
+seed: 42
+
+rollout:
+  num_generations: 4
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_new_tokens: 512
+
+training:
+  learning_rate: 1.0e-6
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+  max_grad_norm: 1.0
+  prompts_per_batch: 1          # 每个更新步的题目数 B
+  max_steps: 500
+  warmup_ratio: 0.03
+  log_every: 1
+  save_every: 100
+  output_dir: outputs/E1_vanilla_grpo
+
+algorithm:
+  name: grpo
+  clip_ratio_low: 0.2
+  clip_ratio_high: 0.2          # GRPO 使用对称裁剪
+  use_clip_higher: false
+  use_dynamic_sampling: false
+  use_token_level_loss: false
+  use_overlong_shaping: false
+  kl_coef: 0.04                 # GRPO 论文 β = 0.04
+  kl_estimator: k3
+  advantage_eps: 1.0e-4
+
+reward:
+  correct_reward: 1.0
+  incorrect_reward: 0.0         # 项目约定；DAPO 论文 Eq.7 使用 -1
+  format_weight: 0.0
+  overlong:
+    max_response_length: 512
+    soft_cache_length: 128
+    penalty_scale: 1.0

@@ -1,0 +1,60 @@
+# 完整 DAPO 配置（实验 E5，四项优化全开）
+# 公式见 DAPO 论文 Eq.8 - Eq.13，实现约定见 docs/algorithm_spec.md
+
+defaults:
+  - model.yaml
+  - data.yaml
+
+experiment:
+  id: E5
+  name: full_dapo
+  description: 完整 DAPO（Clip-Higher + Dynamic Sampling + Token-level Loss + Overlong Reward Shaping）
+
+seed: 42
+
+rollout:
+  num_generations: 4
+  temperature: 1.0
+  top_p: 1.0
+  top_k: -1
+  max_new_tokens: 512
+
+training:
+  learning_rate: 1.0e-6
+  weight_decay: 0.0
+  betas: [0.9, 0.999]
+  adam_eps: 1.0e-8
+  max_grad_norm: 1.0
+  prompts_per_batch: 1
+  max_steps: 500
+  warmup_ratio: 0.03
+  log_every: 1
+  save_every: 100
+  output_dir: outputs/E5_full_dapo
+
+algorithm:
+  name: dapo
+  # ① Clip-Higher
+  use_clip_higher: true
+  clip_ratio_low: 0.2
+  clip_ratio_high: 0.28
+  # ② Dynamic Sampling
+  use_dynamic_sampling: true
+  max_sampling_rounds: 10
+  # ③ Token-level Policy Gradient Loss
+  use_token_level_loss: true
+  # ④ Overlong Reward Shaping
+  use_overlong_shaping: true
+  # DAPO 论文 §2.3 明确移除 KL 项
+  kl_coef: 0.0
+  kl_estimator: k3
+  advantage_eps: 1.0e-4
+
+reward:
+  correct_reward: 1.0
+  incorrect_reward: 0.0         # 见 docs/algorithm_spec.md 与 DAPO Eq.7 的差异说明
+  format_weight: 0.0
+  overlong:
+    max_response_length: 512
+    soft_cache_length: 128
+    penalty_scale: 1.0

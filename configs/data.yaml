@@ -1,0 +1,9 @@
+# 数据集路径与长度配置，由 grpo.yaml / dapo.yaml 通过 defaults 继承
+data:
+  name: gsm8k
+  raw_dir: data/raw/gsm8k/main
+  processed_dir: data/processed/gsm8k
+  train_file: data/processed/gsm8k/train.parquet
+  test_file: data/processed/gsm8k/test.parquet
+  max_prompt_length: 512
+  max_response_length: 512

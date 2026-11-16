@@ -1,0 +1,14 @@
+# 基础模型与 LoRA 配置，由 grpo.yaml / dapo.yaml 通过 defaults 继承
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  local_path: models/Qwen2.5-0.5B-Instruct
+  dtype: auto          # auto | float32 | bfloat16 | float16
+  device: auto         # auto | cpu | cuda
+  trust_remote_code: false
+
+lora:
+  enabled: false       # 无 GPU 阶段保持关闭；租用 GPU 后可改为 true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
