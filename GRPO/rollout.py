@@ -154,11 +154,20 @@ class RolloutBuffer:
 def compute_token_log_probs(
     model, input_ids: torch.Tensor, attention_mask: torch.Tensor | None = None
 ) -> torch.Tensor:
-    """返回 [B, T-1]，第 i 列是 token i+1 的 log prob。"""
+    """返回 [B, T-1]，第 i 列是 token i+1 的 log prob。
+
+    显存提示：词表 V=151936，logits 形状是 [N, L, V]，每份 fp32 副本约
+    4·N·L·V 字节。因此这里用 F.log_softmax(..., dtype=torch.float32) 直接
+    在 fp32 下计算，而不是先 logits.float() 再 log_softmax —— 后者会同时
+    多留一份同样大小的 fp32 张量（N=8、L=620 时约 3 GB），12 GB 卡上直接
+    OOM。数学结果完全一致，只是少一份中间副本。
+    """
     outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-    logits = outputs.logits[:, :-1, :].float()
+    logits = outputs.logits[:, :-1, :]
     labels = input_ids[:, 1:]
-    log_probs = torch.log_softmax(logits, dim=-1)
+    log_probs = torch.nn.functional.log_softmax(
+        logits, dim=-1, dtype=torch.float32
+    )
     return torch.gather(log_probs, dim=-1, index=labels.unsqueeze(-1)).squeeze(-1)
 
 
@@ -172,6 +181,58 @@ def aligned_token_log_probs(
     )
     aligned[:, 1:] = token_log_probs
     return aligned
+
+
+@torch.inference_mode()
+def aligned_log_probs_and_entropy(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    chunk_size: int = 64,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """一次前向同时返回对齐 log prob 与逐 token 策略熵，都是 [B, T]。
+
+    熵定义为 H_t = -Σ_v p_v log p_v，衡量当前策略在位置 t 上的"犹豫程度"：
+    - 训练早期通常在 1~3 之间并缓慢下降；
+    - 若持续跌向 0，说明策略塌缩成近乎确定性的输出（RLHF 里典型的 entropy collapse）。
+
+    为什么单独写一个函数而不是改 compute_token_log_probs：
+    1. 熵需要整份 log_softmax，而 log prob 只需要被选中的那一个 token；
+    2. 按序列分块（chunk_size 个位置一批）计算，避免同时存在多份
+       [B, L, V] 的 fp32 张量 —— V=151936 时每份都是 GB 级；
+    3. 本函数只用于诊断，全程 inference_mode，不建计算图。
+
+    只用来打日志的指标，不参与梯度。
+    """
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits[:, :-1, :]
+    labels = input_ids[:, 1:]
+
+    log_prob_chunks: list[torch.Tensor] = []
+    entropy_chunks: list[torch.Tensor] = []
+    for start in range(0, logits.shape[1], chunk_size):
+        chunk = logits[:, start : start + chunk_size, :].float()
+        log_probs = torch.log_softmax(chunk, dim=-1)
+        picked = torch.gather(
+            log_probs, dim=-1, index=labels[:, start : start + chunk_size].unsqueeze(-1)
+        ).squeeze(-1)
+        entropy = -(log_probs.exp() * log_probs).sum(dim=-1)
+        log_prob_chunks.append(picked)
+        entropy_chunks.append(entropy)
+        del chunk, log_probs
+
+    token_log_probs = torch.cat(log_prob_chunks, dim=1)
+    token_entropy = torch.cat(entropy_chunks, dim=1)
+
+    aligned_log_probs = torch.zeros(
+        input_ids.shape, dtype=token_log_probs.dtype, device=token_log_probs.device
+    )
+    aligned_entropy = torch.zeros(
+        input_ids.shape, dtype=token_entropy.dtype, device=token_entropy.device
+    )
+    aligned_log_probs[:, 1:] = token_log_probs
+    aligned_entropy[:, 1:] = token_entropy
+    return aligned_log_probs, aligned_entropy
 
 
 class HFGenerator:

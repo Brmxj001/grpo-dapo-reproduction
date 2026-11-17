@@ -14,12 +14,15 @@ DEFAULT_PLOT_METRICS = (
     "loss",
     "policy_loss",
     "kl",
+    "policy_entropy",
     "reward_mean",
     "reward_std",
     "clip_fraction",
     "ratio_mean",
     "avg_response_length",
+    "truncation_rate",
     "grad_norm",
+    "gpu_mem_gb",
 )
 
 
@@ -46,7 +49,36 @@ class MetricsLogger:
                 f"{key}={value:.4f}" if isinstance(value, float) else f"{key}={value}"
                 for key, value in record.items()
             )
-            print(f"[{split}] {formatted}")
+            # flush=True：stdout 重定向到文件时默认是块缓冲（4–8 KB），
+            # 不显式 flush 会让 "实时日志" 延迟几十条才出现。
+            print(f"[{split}] {formatted}", flush=True)
+
+    def truncate_after(self, step: int) -> int:
+        """只保留 step 及之前的记录，返回删除条数。
+
+        断点续训时，权重会回退到检查点；继续训练会重新产生这些步的指标。
+        若不清理，metrics.jsonl 里会出现重复/前后矛盾的步号，曲线也会错乱。
+        同时把保留的记录载入 ``history``，续训结束后的曲线仍覆盖完整训练过程。
+        """
+        self._file.flush()
+        records: list[dict] = []
+        if self.log_path.exists():
+            for line in self.log_path.read_text(encoding="utf-8").splitlines():
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+        kept = [record for record in records if int(record.get("step", 0)) <= step]
+        removed = len(records) - len(kept)
+        if removed:
+            self._file.close()
+            self.log_path.write_text(
+                "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept),
+                encoding="utf-8",
+            )
+            self._file = self.log_path.open("a", encoding="utf-8")
+        self.history = kept
+        return removed
 
     def summary(self, split: str = "train") -> dict[str, float]:
         """返回当前 history 中各指标的平均值。"""

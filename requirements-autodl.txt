@@ -1,0 +1,22 @@
+# AutoDL（Ubuntu 22.04 + RTX 3080 Ti 12 GB）实测可用的依赖锁定
+#
+# 重要：不要在云机上执行 `pip install -r requirements.txt`。
+# 那份是 macOS/CPU 环境用的锁版本（torch 2.2.2 / numpy 1.26 / pyarrow 17），
+# 会把云机镜像预装的 torch 2.8.0+cu128 和 numpy 2.3 降级，导致 CUDA 不可用。
+#
+# torch 用镜像自带的 2.8.0+cu128，不在本文件固定（固定了也装不上预编译 wheel）。
+# 2026-11-17 在本实例上 `pip check` 无冲突，训练/评测均实跑通过。
+
+transformers==4.46.3
+peft==0.13.2
+accelerate==1.1.1
+datasets==3.2.0
+safetensors==0.8.0
+tokenizers==0.20.3
+sentencepiece==0.2.3
+numpy==2.3.2
+pandas==3.1.1
+pyarrow==26.0.1
+matplotlib==3.10.5
+PyYAML==6.0.2
+tqdm==4.70.1

@@ -47,8 +47,22 @@ grpo-dapo-reproduction/
 │   ├── inspect_gsm8k.py        # 数据检查
 │   └── check_environment.py    # 环境自检
 ├── tests/                      # CPU/Mock 单元测试
-├── docs/algorithm_spec.md      # 公式、出处与实现约定
-└── requirements.txt
+├── docs/
+│   ├── algorithm_spec.md       # 公式、出处与实现约定
+│   ├── server_setup.md         # 云服务器（AutoDL）环境还原指南
+│   └── environment_troubleshooting.md  # 踩坑记录（现象/分析/尝试/方案）
+├── requirements.txt            # macOS/CPU 环境
+└── requirements-autodl.txt     # AutoDL GPU 环境（实测可用版本）
+```
+
+## 云 GPU 训练
+
+12 GB 卡上跑 LoRA 的完整步骤（换机器后如何快速还原）见
+[`docs/server_setup.md`](docs/server_setup.md)。
+
+```bash
+export PATH=/root/miniconda3/bin:$PATH
+python scripts/train_grpo_standalone.py --config configs/grpo_lora.yaml
 ```
 
 ## 环境安装

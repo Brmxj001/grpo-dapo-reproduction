@@ -1,0 +1,34 @@
+# Vanilla GRPO + LoRA（显存受限时的配置，例如 12 GB 卡）
+# 继承 configs/grpo.yaml，只覆盖与 LoRA 相关的项。
+
+defaults:
+  - grpo.yaml
+
+experiment:
+  id: E1-LoRA
+  name: vanilla_grpo_lora
+  description: Vanilla GRPO + LoRA(r=16)，面向 12 GB 显存
+
+training:
+  learning_rate: 1.0e-4      # LoRA 可训练参数仅为全参的 ~1.8%，学习率需放大约 100 倍
+  # prompts_per_batch 必须是 1：实测 B=2 + G=4 + max_new_tokens=512 时，
+  # logits 张量 [N=8, L≈620, V=151936] 的 fp32 副本单份约 3 GB，
+  # 峰值 11.09 GB 直接 OOM（12 GB 卡）。B=1 时峰值 8.57 GB，余量约 3 GB。
+  prompts_per_batch: 1
+  # 梯度累积：显存只按 prompts_per_batch 算，等效 batch 变大。
+  # 想用等效"每步 4 道题"时设为 4 —— 显存不变，但单步耗时约翻 4 倍。
+  grad_accum_steps: 1
+  # 数据顺序：false = 按文件顺序循环（与作者 E1 基线一致）
+  shuffle: false
+  # 检查点：500 步总量下每 100 步太粗（崩在 490 步要回退 90 步）。
+  # 每 25 步存一次 → 最多丢 10 分钟；单个检查点约 105 MB
+  # （adapter 35 MB + 优化器状态 70 MB），20 个共约 2 GB。
+  save_every: 25
+  output_dir: outputs/E1_grpo_lora
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
