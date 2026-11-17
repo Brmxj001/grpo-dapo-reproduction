@@ -67,6 +67,24 @@ export PATH=/root/miniconda3/bin:$PATH
 python scripts/train_grpo_standalone.py --config configs/grpo_lora.yaml
 ```
 
+## 实验结果
+
+### E1 · GRPO + LoRA · 300 步（2026-11-17）
+
+GSM8K test 1319 题、贪心解码、batch=16：
+
+| 模型 | 准确率 | 平均长度 | 截断率 |
+|---|---|---|---|
+| 基座 Qwen2.5-0.5B-Instruct | 0.4306 | 319.9 | 6.75% |
+| E1 step_300 | 0.4049 | 330.9 | 7.88% |
+
+配对 McNemar p=0.078。训练曲线、评测明细和原因分析见
+[`docs/experiment_E1_grpo_lora.md`](docs/experiment_E1_grpo_lora.md)；
+权重在 [Release v0.1-E1-grpo-step300](https://github.com/Brmxj001/grpo-dapo-reproduction/releases/tag/v0.1-E1-grpo-step300)。
+
+一句话结论：**300 步（仅 4% 训练集）不足以让 GRPO 在 GSM8K 上超过基座**，
+53% 的步是零方差空转，熵从 0.99 跌到 0.40 —— 正是 DAPO 四个开关针对的病灶。
+
 ## 环境安装
 
 ```bash

@@ -52,6 +52,8 @@
 | 28 | 推送 | WSL 访问 `github.com` 超时（`api.github.com` 却 200），Windows 正常 | 代理只绑 127.0.0.1；改用 Windows 便携版 git + `GIT_ASKPASS` 推送 |
 | 29 | 远程 | SSH 启动评测报 `setsid: command not found` | PowerShell 的双引号提前展开了 `$PATH`；外层改用单引号 |
 | 30 | 远程 | 后台任务的日志文件"找不到"，但进程在跑 | `&` 优先级低于 `&&`，`tail` 在原 cwd 执行；一律用绝对路径 |
+| 31 | 推送 | `git push` 返回 403 `Permission ... denied to Brmxj001`，但账号明明是仓库 owner | fine-grained token 只给了读权限；补上 `Contents: Read and write` 后正常 |
+| 32 | 推送 | 令牌修好后 `git push` 报 `Failed to connect to github.com:443`，而 `Invoke-WebRequest` 却正常 | git 不走系统代理；给 git 显式指定 `-c http.proxy=http://127.0.0.1:7890` |
 
 ---
 
@@ -861,6 +863,58 @@ tail -f /root/autodl-tmp/grpo-dapo-reproduction/outputs/train_lora.log
 
 **经验**：一条 SSH 命令里既 `cd` 又后台又查看日志时，等于把三个 shell 语义揉在一起。
 要么拆成两条 ssh，要么一律绝对路径。
+
+---
+
+### 31. 令牌有账号权限却推不上去（403）
+
+**现象**：
+```
+remote: Permission to Brmxj001/grpo-dapo-reproduction.git denied to Brmxj001.
+fatal: unable to access '...': The requested URL returned error: 403
+```
+而 `gh auth status` 显示登录的就是仓库 owner `Brmxj001`，
+GitHub API 返回的 `permissions.push` 也是 `true`。
+
+**分析**：`permissions` 字段描述的是**这个账号在仓库里的角色**，不是**这个令牌被授予的权限**。
+fine-grained token 生成时如果选的是 "Public repositories (read-only)"，
+或者勾了仓库却没给 `Contents: write`，就出现"账号是管理员、令牌只能读"的组合。
+
+**定位手段**（一眼区分读/写权限，且不会在日志里泄露令牌）：
+```powershell
+curl.exe -s -o NUL -w "%{http_code}\n" -u "Brmxj001:$TOK" `
+  "https://github.com/<owner>/<repo>.git/info/refs?service=git-receive-pack"   # 403 = 无写权限
+curl.exe -s -o NUL -w "%{http_code}\n" -u "Brmxj001:$TOK" `
+  "https://github.com/<owner>/<repo>.git/info/refs?service=git-upload-pack"    # 200 = 可读
+```
+
+**最终方案**：在 token 设置页把 **Contents** 改成 `Read and write`（fine-grained token 编辑后令牌值不变）。
+
+**经验**：遇到 403 先分清是**账号权限**还是**令牌范围**。API 的 `permissions` 字段会骗人，
+直接打 git 的 `receive-pack` 端点最准。
+
+---
+
+### 32. 同一台机器：PowerShell 能访问 GitHub，git 却连不上
+
+**现象**：
+```powershell
+Invoke-WebRequest https://github.com        # 200
+git push                                     # Failed to connect to github.com:443 after 21s
+```
+
+**分析**：`Invoke-WebRequest`（.NET）默认走 **WinINET 系统代理**（本机是 `127.0.0.1:7890`），
+而 Git for Windows 自带的 libcurl **不读系统代理**，直连 `github.com:443`。
+代理开着时能通的地方，换成 git 就变成"直连被墙"。
+
+**最终方案**：给 git 显式加代理（一次性的 `-c`，不改全局配置）：
+```powershell
+git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin main
+```
+**验证**：`e67ea6b..5b12b6f  main -> main`。
+
+**经验**：判断"是不是代理问题"最快的办法是看**谁在访问** —— 浏览器/.NET 走系统代理，
+curl/git 走环境变量 `HTTP_PROXY`，Python `requests` 又走另一套。同一个 URL 结果不同是常态。
 
 ---
 
