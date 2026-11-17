@@ -46,7 +46,7 @@
 | 22 | 训练 | 配置里一半字段是摆设：warmup、weight_decay、betas、adam_eps、log_every 都不生效；也没有梯度累积和断点续训 | 全部补齐，并新增 `grad_accum_steps` / `shuffle` / `--resume` |
 | 23 | 本地 | `pull_metrics.ps1` 在 Windows PowerShell 5.1 下报「缺少字符串终止符」 | 无 BOM 的 UTF-8 被当成 GBK 解析；补上 UTF-8 BOM 后正常 |
 | 24 | 版本控制 | 49 个已跟踪文件全部显示为「整文件修改」 | 工作区被转成 CRLF；统一转回 LF（与 HEAD 一致）后，真实改动只有 3 个文件 |
-| 25 | 训练 | 断点续训冒烟失败：`checkpoints/step_2` 不存在 | `save_every=25` 时 4 步训练不会存档，且训练结束不补存；新增 `--save-every`，结尾补存最后一次 |
+| 25 | 训练 | 断点续训冒烟失败：`checkpoints/step_2` 不存在 | `save_every=25` 时 4 步训练不会存档，且训练结束不补存；新增 `--save-every`、结尾补存、续训回退指标日志并恢复 RNG |
 
 ---
 
@@ -580,8 +580,14 @@ FileNotFoundError: 检查点不存在：/root/autodl-tmp/grpo-dapo-reproduction/
    if self.save_every > 0 and self._step % self.save_every != 0:
        self.save_checkpoint(self._step)
    ```
-**验证**：4 步 + `--save-every 2` → 存档 `step_2`、`step_4`；从 `step_2` 恢复后
-训练从第 3 步继续，日志步数 3、4，没有重复执行 1、2。
+**验证**（两轮）：
+1. 4 步 + `--save-every 2` → 存档 `step_2`、`step_4`；从 `step_2` 恢复后
+   权重/优化器/步数/游标都正确恢复，但 `metrics.jsonl` 变成 `[1,2,3,4,3,4]` ——
+   第 3、4 步被重算了一遍，旧记录还留着；
+2. 增加 `truncate_after()` 与 RNG 状态保存后再测：
+   续训时打印「指标日志已回退到第 2 步（删除 2 条旧记录）」，最终步数为 `[1,2,3,4]`，
+   且第 3、4 步的所有指标（loss/kl/entropy/grad_norm/num_response_tokens/…）
+   与未中断时**逐项一致**（step_time 除外），说明采样也可复现。
 
 **经验**：检查点策略要同时覆盖"周期性"和"终点"两种情况；
 冒烟测试要显式覆盖配置默认值，否则测的是配置、不是被测逻辑。
