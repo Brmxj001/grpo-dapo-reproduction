@@ -50,6 +50,8 @@ grpo-dapo-reproduction/
 ├── docs/
 │   ├── algorithm_spec.md       # 公式、出处与实现约定
 │   ├── server_setup.md         # 云服务器（AutoDL）环境还原指南
+│   ├── experiment_E1_grpo_lora.md      # 实验 E1：GRPO + LoRA 300 步（结果与结论）
+│   ├── session_state_2026-11-17.md     # 本轮会话状态快照（换服务器时先读这个）
 │   └── environment_troubleshooting.md  # 踩坑记录（现象/分析/尝试/方案）
 ├── requirements.txt            # macOS/CPU 环境
 └── requirements-autodl.txt     # AutoDL GPU 环境（实测可用版本）

@@ -1,0 +1,111 @@
+{
+  "steps": 300,
+  "first_step": 1,
+  "last_step": 300,
+  "reward_mean": {
+    "mean": 0.24916666666666668,
+    "last": 0.25
+  },
+  "zero_variance_ratio": {
+    "mean": 0.53,
+    "last": 0.0
+  },
+  "policy_entropy": {
+    "mean": 0.5876327623754136,
+    "last": 0.34005013366734277
+  },
+  "avg_response_length": {
+    "mean": 338.11583333333334,
+    "last": 435.25
+  },
+  "truncation_rate": {
+    "mean": 0.14916666666666667,
+    "last": 0.25
+  },
+  "kl": {
+    "mean": 0.08522887517562291,
+    "last": 0.09258007258176804
+  },
+  "clip_fraction": {
+    "mean": 0.009546529771372055,
+    "last": 0.012636415660381317
+  },
+  "grad_norm": {
+    "mean": 0.5279192739911377,
+    "last": 0.8385053873062134
+  },
+  "step_time": {
+    "mean": 22.461441712193192,
+    "last": 25.598972987383604
+  },
+  "gpu_mem_gb_peak": 10.765861988067627,
+  "total_hours": 1.8717868093494325,
+  "buckets": [
+    {
+      "from": 1,
+      "to": 50,
+      "reward": 0.21,
+      "zero_var": 0.48,
+      "entropy": 0.9863999019249827,
+      "length": 346.08,
+      "truncation": 0.18,
+      "rewarded": 27,
+      "n": 50
+    },
+    {
+      "from": 51,
+      "to": 100,
+      "reward": 0.215,
+      "zero_var": 0.6,
+      "entropy": 0.5398728444345345,
+      "length": 308.055,
+      "truncation": 0.07,
+      "rewarded": 22,
+      "n": 50
+    },
+    {
+      "from": 101,
+      "to": 150,
+      "reward": 0.315,
+      "zero_var": 0.44,
+      "entropy": 0.4871981749978722,
+      "length": 335.065,
+      "truncation": 0.16,
+      "rewarded": 31,
+      "n": 50
+    },
+    {
+      "from": 151,
+      "to": 200,
+      "reward": 0.285,
+      "zero_var": 0.48,
+      "entropy": 0.3940312790036186,
+      "length": 321.28,
+      "truncation": 0.095,
+      "rewarded": 29,
+      "n": 50
+    },
+    {
+      "from": 201,
+      "to": 250,
+      "reward": 0.17,
+      "zero_var": 0.7,
+      "entropy": 0.7170991413885491,
+      "length": 373.775,
+      "truncation": 0.265,
+      "rewarded": 17,
+      "n": 50
+    },
+    {
+      "from": 251,
+      "to": 300,
+      "reward": 0.3,
+      "zero_var": 0.48,
+      "entropy": 0.4011952325029243,
+      "length": 344.44,
+      "truncation": 0.125,
+      "rewarded": 28,
+      "n": 50
+    }
+  ]
+}

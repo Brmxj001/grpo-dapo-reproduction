@@ -1,0 +1,16 @@
+{
+  "n": 1319,
+  "accuracy_base": 0.4306292645943897,
+  "accuracy_new": 0.4048521607278241,
+  "delta": -0.02577710386656562,
+  "ci95_halfwidth": 0.02780003213827492,
+  "both_correct": 376,
+  "only_base": 192,
+  "only_new": 158,
+  "neither": 593,
+  "mcnemar_p": 0.07759527630483383,
+  "length_base": 319.92721758908266,
+  "length_new": 330.9431387414708,
+  "truncation_base": 0.06747536012130402,
+  "truncation_new": 0.07884761182714177
+}

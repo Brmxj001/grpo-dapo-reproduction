@@ -6,8 +6,12 @@ models/
 *.pth
 *.gguf
 
-# 运行产物
-outputs/
+# 运行产物：只排除体积大的部分，轻量结果（曲线/指标/评测）入库
+outputs/**/checkpoints/
+outputs/**/samples/
+outputs/**/*.log
+outputs/*.tgz
+outputs/*.zip
 wandb/
 *.log
 __pycache__/
@@ -21,3 +25,11 @@ __pycache__/
 # 本地工具与系统文件
 .claude/settings.local.json
 .DS_Store
+
+# 凭据（绝不入库）
+.github_token
+githubtoken.txt
+*ghp_*
+*github_pat_*
+*.token
+.env

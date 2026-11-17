@@ -49,6 +49,9 @@
 | 25 | 训练 | 断点续训冒烟失败：`checkpoints/step_2` 不存在 | `save_every=25` 时 4 步训练不会存档，且训练结束不补存；新增 `--save-every`、结尾补存、续训回退指标日志并恢复 RNG |
 | 26 | 训练 | 正式训练第 12 步 backward OOM（要 1.50 GiB，只剩 1.45 GiB） | 长回答步的 log-prob 全量张量反向峰值太大；改成分块计算（`chunked_token_log_probs`），峰值降约 1 GB |
 | 27 | 监控 | 看门狗在非交互 SSH 下 `python: command not found`，退化成误报 `process_gone` | 脚本内显式 `export PATH=/root/miniconda3/bin:$PATH` |
+| 28 | 推送 | WSL 访问 `github.com` 超时（`api.github.com` 却 200），Windows 正常 | 代理只绑 127.0.0.1；改用 Windows 便携版 git + `GIT_ASKPASS` 推送 |
+| 29 | 远程 | SSH 启动评测报 `setsid: command not found` | PowerShell 的双引号提前展开了 `$PATH`；外层改用单引号 |
+| 30 | 远程 | 后台任务的日志文件"找不到"，但进程在跑 | `&` 优先级低于 `&&`，`tail` 在原 cwd 执行；一律用绝对路径 |
 
 ---
 
@@ -767,6 +770,100 @@ python scripts/evaluate_gsm8k.py --batch-size 16 \
 
 ---
 
+### 28. WSL 打不开 github.com，Windows 却能打开
+
+**现象**：训练结束要 `git push`，WSL 里报错：
+```
+fatal: unable to access 'https://github.com/...': GnuTLS recv error (-110)
+```
+同一时刻：
+- WSL `curl https://github.com` → 超时（15 s 无响应）
+- WSL `curl https://api.github.com` → **200**
+- Windows `Invoke-WebRequest https://github.com` → **200**
+- `Test-NetConnection github.com -Port 443` → True
+- WSL DNS 解析出 `20.247.166.64`，地址是对的
+
+**分析**：不是 DNS，也不是证书，是**出口路径**不同。本机代理（Clash）监听在
+`127.0.0.1:7890`，只对本机 Windows 进程生效；WSL2 是独立 NAT 网络，
+既拿不到 `127.0.0.1` 的代理，直连又被墙。`api.github.com` 恰好没被卡，所以出现
+"一半能通用一半不通"的错觉。
+
+**尝试**：
+1. WSL 里设 `https_proxy=http://172.29.192.1:7890`（WSL 网关=Windows 宿主）→ 仍超时，
+   因为 Clash 没开 `Allow LAN`，不监听 `0.0.0.0`；
+2. `curl -4` 强制 IPv4 → 仍超时；
+3. `netstat | findstr 7890` → 本机根本没有监听（代理当时未运行），
+   注册表里的 `ProxyEnable=1` 只是残留设置。
+
+**最终方案**：绕开 WSL 的网络，**用 Windows 上的便携版 git 推送**。
+凭据不写进命令行（会进进程列表和对话记录），而是用 `GIT_ASKPASS`：
+```powershell
+$env:GIT_ASKPASS = "$env:TEMP\gh_askpass.cmd"   # 内容：用户名回 Brmxj001，密码 type 令牌文件
+$env:GIT_TERMINAL_PROMPT = "0"
+& D:\Tools\PortableGit\cmd\git.exe -c core.autocrlf=false push origin main
+```
+
+**经验**：
+- "同一个网站，Windows 能开、WSL 打不开"几乎都是**代理只绑 127.0.0.1**；
+  要么在代理里开 Allow LAN，要么换到 Windows 侧执行；
+- `api.github.com` 通不代表 `github.com` 通，Git 走的是后者；
+- 用 Windows git 操作仓库时务必带 `-c core.autocrlf=false`，否则又会引入 CRLF（见 #24）。
+
+---
+
+### 29. 远程命令里的 `$PATH` 被本地 PowerShell 抢先展开
+
+**现象**：启动评测的命令执行后立刻失败：
+```
+bash: line 1: setsid: command not found
+```
+而同一份命令手动在服务器终端里能跑。
+
+**分析**：命令写成
+```powershell
+ssh autodl "export PATH=/root/miniconda3/bin:\$PATH && setsid nohup python ..."
+```
+PowerShell 的转义符是反引号（backtick），**不是反斜杠**。`\$PATH` 里的 `\` 是字面字符，
+`$PATH` 仍被 PowerShell 展开成 Windows 的 PATH，于是远端拿到的是
+`PATH='/root/miniconda3/bin:\$PATH'` —— 一个只有 conda 目录的字面量路径，
+`/usr/bin` 全部丢失，`setsid`、`nohup` 自然都找不到。
+
+**尝试**：把 `\$PATH` 改成 `$env:PATH` 拼进去 —— 能跑，但会把 Windows 路径塞进 Linux 环境，
+属于歪打正着。
+
+**最终方案**：**外层命令一律用 PowerShell 单引号**，变量留给远端 bash 展开：
+```powershell
+ssh autodl 'export PATH=/root/miniconda3/bin:$PATH && setsid nohup python ...'
+```
+**验证**：`pgrep -af evaluate_gsm8k` 能看到进程，日志正常滚动。
+
+**经验**：从 PowerShell 发远程命令，只要内容含 `$`，就用单引号包住；
+这比记"几个反斜杠"可靠得多。同类坑还有 `!`（命令历史展开）和 `%`（部分场景）。
+
+---
+
+### 30. 后台训练的日志"不在那里"，进程却在跑
+
+**现象**：
+```powershell
+ssh autodl 'cd /root/autodl-tmp/grpo-dapo-reproduction && ... nohup python train.py > outputs/x.log 2>&1 & sleep 8; tail outputs/x.log'
+```
+`tail` 报 `No such file or directory`，但 `pgrep` 显示进程活得好好的。
+
+**分析**：shell 里 `&` 的优先级**低于** `&&`。`A && B & C` 实际是
+`(A && B) &` 然后 `C`。C（也就是 `sleep` 和 `tail`）在**原 shell 的工作目录**（`/root`）执行，
+所以它找的是 `/root/outputs/x.log`；而进程重定向的文件在 `cd` 之后的目录里。
+
+**最终方案**：排查/查看日志时用**绝对路径**，启动脚本里也统一写绝对路径：
+```bash
+tail -f /root/autodl-tmp/grpo-dapo-reproduction/outputs/train_lora.log
+```
+
+**经验**：一条 SSH 命令里既 `cd` 又后台又查看日志时，等于把三个 shell 语义揉在一起。
+要么拆成两条 ssh，要么一律绝对路径。
+
+---
+
 ## 指标判读指南（哪些"看起来不对"其实是正常的）
 
 训练早期几类"异常"数字，实测确认都是设计使然，不要误判成 bug：
@@ -807,5 +904,7 @@ python scripts/evaluate_gsm8k.py --batch-size 16 \
 - [x] 冒烟 1：`policy_entropy` / `learning_rate` / `truncation_rate` / `gpu_mem_gb` 都正常落盘
 - [x] 冒烟 2：`--grad-accum-steps 2` 等效 B=2，显存不涨、无 OOM，单步约 31 s
 - [x] 冒烟 3：`--save-every 2` → 存档 step_2/step_4；从 step_2 续训，日志回退后重算，指标可复现
-- [ ] 500 步完整训练（预计 3.2 小时）
-- [ ] 训练后评测：与基座在 GSM8K 上的 pass@1 对比（同一脚本、batch=16）
+- [x] 完整训练 E1：300 步（1.87 小时，显存峰值 10.77 GB），结果见 `docs/experiment_E1_grpo_lora.md`
+- [x] 训练后评测：0.4049 vs 基线 0.4306（−2.58 点，McNemar p=0.078），长度 +11 token
+- [ ] DAPO 对照实验（同预算 300 步，只差四个开关）
+- [ ] 扩大训练量：300 步只用了 4% 训练集，下一步优先加题目数

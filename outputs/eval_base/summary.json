@@ -1,0 +1,15 @@
+{
+  "model_path": "models/Qwen2.5-0.5B-Instruct",
+  "adapter": null,
+  "test_file": "data/processed/gsm8k/test.parquet",
+  "num_questions": 1319,
+  "num_candidates": 1319,
+  "num_generations": 1,
+  "max_new_tokens": 512,
+  "temperature": 0.0,
+  "solved_questions": 568,
+  "accuracy": 0.4306292645943897,
+  "avg_response_tokens": 319.92721758908266,
+  "truncation_rate": 0.06747536012130402,
+  "elapsed_seconds": 984.2533189188689
+}
