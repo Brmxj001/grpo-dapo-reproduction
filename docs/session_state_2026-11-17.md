@@ -86,7 +86,45 @@
 
 ---
 
-## 7. 快速接续
+## 7. 换一台电脑怎么继续
+
+**会跟着 git 走的**（`git clone` 就有）：代码、配置、文档、训练曲线、metrics、评测结果。
+
+**不会跟着走的**（需要手动搬）：
+
+| 内容 | 原位置 | 说明 |
+|---|---|---|
+| SSH 私钥 + 配置 | `C:\Users\EDY\.ssh\`（`autodl_ed25519`、`config`） | **最关键**，没有它连不上服务器 |
+| GitHub 令牌 | 仓库根目录 `githubtoken.txt` | 已在 `.gitignore`，需重新创建或另存 |
+| Claude 记忆 | `C:\Users\EDY\.claude\projects\D--\memory\` | 记录习惯等长期偏好 |
+| 对话记录 | `C:\Users\EDY\.claude\projects\D--\*.jsonl` | 可选 |
+
+**新电脑上的步骤**：
+
+```powershell
+# 1. 装 git 和 Claude Code；把旧机器的 .ssh 整个文件夹拷到 C:\Users\<你>\.ssh\
+
+# 2. 克隆仓库（公开仓库，不需要令牌）
+git clone https://github.com/Brmxj001/grpo-dapo-reproduction.git
+cd grpo-dapo-reproduction
+
+# 3. 验证能连服务器（前提：AutoDL 实例还活着）
+ssh autodl "pgrep -af 'train_grpo|evaluate_gsm8k'"
+
+# 4. 启动 Claude Code，让它读这两份文档再动手
+claude
+#   「先读 docs/session_state_2026-11-17.md 和 docs/experiment_E1_grpo_lora.md，然后继续 DAPO 实验」
+```
+
+权重两大来源：服务器上的 `outputs/E1_grpo_lora/checkpoints/step_300/`，
+或 GitHub Release `v0.1-E1-grpo-step300` 里的 `step_300_lora.zip`。
+
+⚠️ AutoDL 的**关机**保留数据盘，**释放**则全部清空。换电脑前确认实例状态；
+若已释放，按 [`server_setup.md`](server_setup.md) 从零重建（约 30–40 分钟，主要是下模型）。
+
+---
+
+## 8. 快速接续
 
 ```powershell
 # 1. 连服务器
