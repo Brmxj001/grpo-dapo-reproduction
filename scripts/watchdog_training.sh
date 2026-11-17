@@ -5,7 +5,7 @@
 #
 # 用法：
 #   bash scripts/watchdog_training.sh [输出目录] [训练日志] [里程碑步数] [轮询秒数]
-#   bash scripts/watchdog_training.sh outputs/E1_grpo_lora outputs/train_lora_500.log 25 30
+#   bash scripts/watchdog_training.sh outputs/E1_grpo_lora outputs/train_lora.log 25 30
 #
 # 退出码：
 #   0 = 到达下一个里程碑（默认每 100 步），输出该点摘要
@@ -15,8 +15,12 @@
 #   5 = 日志里出现 OOM
 set -u
 
+# 非交互 SSH 不会加载 conda，必须显式加 PATH，否则 read_metrics 里的
+# python 找不到，步数读成空串，整数比较直接报错。
+export PATH=/root/miniconda3/bin:$PATH
+
 OUT_DIR="${1:-outputs/E1_grpo_lora}"
-LOG_FILE="${2:-outputs/train_lora_500.log}"
+LOG_FILE="${2:-outputs/train_lora.log}"
 MILESTONE_EVERY="${3:-25}"
 INTERVAL="${4:-30}"
 

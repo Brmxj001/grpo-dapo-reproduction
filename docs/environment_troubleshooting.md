@@ -47,6 +47,8 @@
 | 23 | 本地 | `pull_metrics.ps1` 在 Windows PowerShell 5.1 下报「缺少字符串终止符」 | 无 BOM 的 UTF-8 被当成 GBK 解析；补上 UTF-8 BOM 后正常 |
 | 24 | 版本控制 | 49 个已跟踪文件全部显示为「整文件修改」 | 工作区被转成 CRLF；统一转回 LF（与 HEAD 一致）后，真实改动只有 3 个文件 |
 | 25 | 训练 | 断点续训冒烟失败：`checkpoints/step_2` 不存在 | `save_every=25` 时 4 步训练不会存档，且训练结束不补存；新增 `--save-every`、结尾补存、续训回退指标日志并恢复 RNG |
+| 26 | 训练 | 正式训练第 12 步 backward OOM（要 1.50 GiB，只剩 1.45 GiB） | 长回答步的 log-prob 全量张量反向峰值太大；改成分块计算（`chunked_token_log_probs`），峰值降约 1 GB |
+| 27 | 监控 | 看门狗在非交互 SSH 下 `python: command not found`，退化成误报 `process_gone` | 脚本内显式 `export PATH=/root/miniconda3/bin:$PATH` |
 
 ---
 
@@ -594,6 +596,71 @@ FileNotFoundError: 检查点不存在：/root/autodl-tmp/grpo-dapo-reproduction/
 
 ---
 
+### 26. 正式训练第 12 步 backward OOM
+
+**现象**：
+```
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 1.50 GiB.
+GPU 0 has a total capacity of 11.63 GiB of which 1.45 GiB is free.
+this process has 10.17 GiB memory in use. Of the allocated memory 9.72 GiB
+is allocated by PyTorch, and 141.51 MiB is reserved but unallocated.
+```
+训练在第 12 步挂掉（前 11 步正常）。`gpu_mem_gb` 显示第 10/11 步
+平均回答 501 token、75% 截断，峰值已到 10.86 GB。
+
+**分析**：
+1. **不是泄漏**：每步峰值随回答长度在 6–11 GB 之间正常起伏；
+2. **不是碎片**：`reserved but unallocated` 只有 141 MiB；
+3. **是数学上的必然峰值**：训练前向用 `compute_token_log_probs`，
+   `log_softmax` 输出是 `[N, L, V]` 的 fp32 张量（N=4、L≈800、V=151936
+   时约 **2 GB**），它要被反向图保存；`gather` 的反向还要再分配一个
+   同尺寸的全零梯度张量（**又是 2 GB**）。长回答步这两块叠加约 4 GB，
+   再加上权重、激活和生成期缓存，就顶到 11.63 GiB 了；
+4. 注意 torch 报的是 **11.63 GiB 可用**（不是标称 12 GiB），余量比想象更小。
+
+**尝试**：
+- 已经开了 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`，没用 —— 说明不是碎片问题；
+- 降 `max_new_tokens` 或 G 都能省显存，但会改变实验口径（作者基线是 512 / G=4），放弃。
+
+**最终方案**：新增
+`GRPO/rollout.py: chunked_token_log_probs / chunked_aligned_token_log_probs`，
+训练前向改用它（`trainer._micro_step`）。按 token 位置分块（默认 64），
+每块单独算 `log_softmax` + `gather`：
+- 反向图仍保存全部块输出（总大小不变），但 `gather` 的反向梯度只按块分配、
+  用完即释放，峰值少了一份全尺寸梯度（约 2 GB）；
+- 前向期间的瞬时副本也从 2 GB 降到 156 MB；
+- 数学完全等价，新增测试 `test_chunked_log_probs_match_full` 对
+  chunk_size = 1/2/3/64 四种情况与整份实现逐元素比对。
+
+**验证**：
+- 5 个测试文件全部通过（含新的一致性测试）；
+- 重跑训练：第 12 步顺利通过；前 13 步峰值 **10.37 GB**（改前最高 10.86），
+  同样 75% 截断的第 10/11 步从 10.86 降到 **9.86 GB**；
+- 第 1 步 `ratio_mean=1.0000` 仍然成立，说明分块版与推理版 log prob 一致。
+
+**经验**：报 OOM 时先看 `reserved but unallocated` —— 很小就是真实不够用，
+很大才是碎片。词表大的模型（V≈15 万）最容易在 `log_softmax` + `gather`
+这条路径上炸，训练侧一定要分块。
+
+---
+
+### 27. 看门狗误报 `process_gone`
+
+**现象**：看门狗启动后每隔 30 秒打印 `python: command not found`，步数读成空串
+（`[: : integer expression expected`），最后在训练明明还活着时报
+`STATUS=process_gone`，退出码 2。
+
+**分析**：非交互 SSH 不加载 conda 的 PATH，脚本内部调用的是 `python`。
+主训练命令前有 `export PATH=...`，看门狗单独启动时没有。
+
+**最终方案**：在 `scripts/watchdog_training.sh` 顶部加
+`export PATH=/root/miniconda3/bin:$PATH`，不再依赖调用方环境。
+
+**经验**：任何在云机上通过 `ssh host "..."` 直接运行的脚本，
+都要自己保证 PATH，不要假设登录 shell 的配置生效。
+
+---
+
 ## 评测脚本用法
 
 ```bash
@@ -669,7 +736,7 @@ python scripts/evaluate_gsm8k.py --batch-size 16 \
 
 1. **人类可读的每步一行**（训练启动时重定向到此文件）
    ```bash
-   tail -f outputs/train_lora_500.log
+   tail -f outputs/train_lora.log
    ```
 
 2. **指标看板**（推荐）：读 `metrics.jsonl`，显示滑动平均与 ETA

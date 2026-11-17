@@ -29,6 +29,7 @@ from GRPO.rollout import (  # noqa: E402
     RolloutSample,
     SamplingParams,
     aligned_token_log_probs,
+    chunked_aligned_token_log_probs,
 )
 
 _TINY_MODEL = None
@@ -132,6 +133,20 @@ def test_buffer_and_log_probs():
         logits = model(input_ids=input_ids).logits
     manual = torch.log_softmax(logits[0, 3], dim=-1)[input_ids[0, 4]]
     assert torch.isclose(aligned[0, 4], manual, atol=1e-6)
+
+
+def test_chunked_log_probs_match_full():
+    """分块实现必须与整份实现逐元素一致（只是显存策略不同）。"""
+    model = _tiny_model()
+    input_ids = torch.tensor([[5, 9, 12, 7, 3, 8, 11, 6, 4, 2]])
+    full = aligned_token_log_probs(model, input_ids)
+    for chunk_size in (1, 2, 3, 64):
+        chunked = chunked_aligned_token_log_probs(
+            model, input_ids, chunk_size=chunk_size
+        )
+        assert torch.allclose(full, chunked, atol=1e-6), f"chunk_size={chunk_size}"
+        assert chunked.shape == input_ids.shape
+        assert torch.equal(chunked[:, 0], torch.zeros_like(chunked[:, 0]))
 
 
 def test_metrics_logger():

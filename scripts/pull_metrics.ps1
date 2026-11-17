@@ -8,7 +8,7 @@
 # 产出（全部在本地 D:\grpo-dapo-reproduction\outputs\<RemoteOut>\）：
 #   logs\metrics.jsonl   每步一行的原始指标
 #   logs\metrics.csv     同内容转成 CSV，Excel 可直接打开
-#   train_lora_500.log   训练脚本的每步日志
+#   train_lora.log   训练脚本的每步日志
 
 param(
     [int]$IntervalSeconds = 300,
@@ -33,7 +33,7 @@ function Sync-Once {
         return
     }
 
-    scp -q "autodl:$RemoteProject/outputs/train_lora_500.log" (Join-Path $LocalOut "train_lora_500.log") 2>$null
+    scp -q "autodl:$RemoteProject/outputs/train_lora.log" (Join-Path $LocalOut "train_lora.log") 2>$null
 
     # 转 CSV，方便 Excel / 画图
     try {

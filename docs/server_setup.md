@@ -147,7 +147,7 @@ cd /root/autodl-tmp/grpo-dapo-reproduction
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 mkdir -p outputs
 setsid nohup python scripts/train_grpo_standalone.py --config configs/grpo_lora.yaml \
-    > outputs/train_lora_500.log 2>&1 < /dev/null &
+    > outputs/train_lora.log 2>&1 < /dev/null &
 ```
 
 - `setsid nohup`：断开 SSH 不影响训练。
@@ -161,13 +161,13 @@ setsid nohup python scripts/train_grpo_standalone.py --config configs/grpo_lora.
 
 ```bash
 # 每步一行
-tail -f outputs/train_lora_500.log
+tail -f outputs/train_lora.log
 
 # 看板：滑动平均 + ETA
 python scripts/watch_training.py --output outputs/E1_grpo_lora
 
 # 看门狗：异常/到里程碑时退出，交给调用方告警
-bash scripts/watchdog_training.sh outputs/E1_grpo_lora outputs/train_lora_500.log 25 30
+bash scripts/watchdog_training.sh outputs/E1_grpo_lora outputs/train_lora.log 25 30
 ```
 
 本地（Windows）：
@@ -229,7 +229,7 @@ python scripts/evaluate_gsm8k.py --batch-size 16 \
 ├── data/processed/gsm8k/{train,test}.parquet      # 2.4 MB
 ├── configs/grpo_lora.yaml                         # 正式训练配置
 └── outputs/
-    ├── train_lora_500.log
+    ├── train_lora.log
     ├── E1_grpo_lora/{logs/metrics.jsonl, checkpoints/step_*, plots/}
     └── eval_base/{generations.jsonl, summary.json}
 ```
@@ -259,7 +259,7 @@ python scripts/evaluate_gsm8k.py --batch-size 16 \
 # 指标与日志
 scp -r "autodl:/root/autodl-tmp/grpo-dapo-reproduction/outputs/E1_grpo_lora/logs" `
        "D:\grpo-dapo-reproduction\outputs\E1_grpo_lora\logs"
-scp "autodl:/root/autodl-tmp/grpo-dapo-reproduction/outputs/train_lora_500.log" `
+scp "autodl:/root/autodl-tmp/grpo-dapo-reproduction/outputs/train_lora.log" `
     "D:\grpo-dapo-reproduction\outputs\"
 
 # 最终 adapter（约 35 MB，无优化器状态）

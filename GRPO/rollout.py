@@ -183,6 +183,60 @@ def aligned_token_log_probs(
     return aligned
 
 
+def chunked_token_log_probs(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    chunk_size: int = 64,
+) -> torch.Tensor:
+    """训练用：分块计算 [B, T-1] 的 log prob，数学上与
+    ``compute_token_log_probs`` 完全一致，但显存峰值低得多。
+
+    为什么必须分块：V=151936 时 ``log_softmax`` 输出是 [N, L, V] 的 fp32
+    张量（N=4、L≈800 时约 2 GB），它会被反向图保存；而 ``gather`` 的反向
+    还要再分配一个同样大小的全零梯度张量。两者叠加约 4 GB，长回答步直接
+    把 12 GB 卡打爆（实测第 12 步 backward 要 1.5 GiB 时 OOM）。
+
+    分块后，反向图只保存每个 chunk 的 [N, chunk, V] 输出，反向梯度也按
+    chunk 分配并立即释放，峰值从 ~4 GB 降到 ~2 GB。
+    """
+    outputs = model(input_ids=input_ids, attention_mask=attention_mask)
+    logits = outputs.logits[:, :-1, :]
+    labels = input_ids[:, 1:]
+
+    chunks: list[torch.Tensor] = []
+    for start in range(0, logits.shape[1], chunk_size):
+        chunk = logits[:, start : start + chunk_size, :]
+        chunk_log_probs = torch.nn.functional.log_softmax(
+            chunk, dim=-1, dtype=torch.float32
+        )
+        chunks.append(
+            torch.gather(
+                chunk_log_probs,
+                dim=-1,
+                index=labels[:, start : start + chunk_size].unsqueeze(-1),
+            ).squeeze(-1)
+        )
+    return torch.cat(chunks, dim=1)
+
+
+def chunked_aligned_token_log_probs(
+    model,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor | None = None,
+    chunk_size: int = 64,
+) -> torch.Tensor:
+    """``aligned_token_log_probs`` 的分块显存友好版本，用于训练前向。"""
+    token_log_probs = chunked_token_log_probs(
+        model, input_ids, attention_mask, chunk_size=chunk_size
+    )
+    aligned = torch.zeros(
+        input_ids.shape, dtype=token_log_probs.dtype, device=token_log_probs.device
+    )
+    aligned[:, 1:] = token_log_probs
+    return aligned
+
+
 @torch.inference_mode()
 def aligned_log_probs_and_entropy(
     model,

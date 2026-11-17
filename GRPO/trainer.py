@@ -41,6 +41,7 @@ from .rollout import (
     SamplingParams,
     aligned_log_probs_and_entropy,
     aligned_token_log_probs,
+    chunked_aligned_token_log_probs,
 )
 
 from src.data.prompt import build_prompt
@@ -262,7 +263,9 @@ class GRPOTrainer:
         advantages = advantage_result.advantages.reshape(-1)
 
         mask = batch["response_mask"].to(self.device)
-        policy_log_probs = aligned_token_log_probs(
+        # 训练前向必须建图，用分块版本：整份 [N, L, V] 的 fp32 log_softmax
+        # 加 gather 反向梯度约 4 GB，长回答步会 OOM（见 rollout 里的说明）。
+        policy_log_probs = chunked_aligned_token_log_probs(
             self.model,
             batch["input_ids"].to(self.device),
             batch["attention_mask"].to(self.device),
