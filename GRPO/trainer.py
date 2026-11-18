@@ -8,6 +8,10 @@
   复用同一模型，不额外占一份权重；
 - 梯度累积：`training.grad_accum_steps`，每个优化步采样
   `prompts_per_batch × grad_accum_steps` 道题，但显存只按 `prompts_per_batch` 计；
+- 批量 rollout：一个优化步内的所有题合并成一次批量解码（左 padding），
+  再按 micro-batch 反传（docs/perf_optimization_backlog.md P1）；
+- 跳过零梯度步：`training.skip_zero_gradient_steps=true` 时，组内优势全为 0
+  的 micro-batch 不反传（P2）；
 - LR 调度：`training.warmup_ratio` > 0 时线性 warmup，之后恒定；
 - 优化器超参：`weight_decay` / `betas` / `adam_eps`；
 - 数据打乱：`training.shuffle`（默认 false，保持与作者基线一致）；
@@ -23,6 +27,7 @@ from __future__ import annotations
 import copy
 import random
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -137,6 +142,10 @@ class GRPOTrainer:
         # 梯度累积：一个优化步里跑几轮"采样+前向+反向"。
         # 显存按 prompts_per_batch 计，等效 batch = prompts_per_batch × grad_accum_steps。
         self.grad_accum_steps = max(1, int(training_cfg.get("grad_accum_steps", 1)))
+        # 零优势 micro-batch 的梯度恒为 0，跳过反传不改变参数轨迹（P2）。
+        self.skip_zero_gradient_steps = bool(
+            training_cfg.get("skip_zero_gradient_steps", False)
+        )
         self.max_grad_norm = float(training_cfg.get("max_grad_norm", 1.0))
         self.save_every = int(training_cfg.get("save_every", 0))
         self.log_every = max(1, int(training_cfg.get("log_every", 1)))
@@ -184,41 +193,59 @@ class GRPOTrainer:
         return cls(load_config(path), **kwargs)
 
     def rollout_group(self, question: str, ground_truth: str) -> PromptGroup:
-        """对一道题采样 G 条回答并计算奖励。"""
-        prompt = build_prompt(question, self.tokenizer)
-        outputs = self.generator.generate(prompt, self.sampling)
-        group = PromptGroup(
-            prompt_ids=outputs[0].prompt_ids,
-            prompt_text=prompt,
-            question=question,
-            ground_truth=ground_truth,
-        )
-        for output in outputs:
-            result = compute_reward(
-                output.response_text, ground_truth, config=self.reward_config
-            )
-            group.add_sample(
-                RolloutSample(
-                    response_ids=output.response_ids,
-                    response_text=output.response_text,
-                    reward=result.reward,
-                    correct=result.correct,
-                    truncated=output.truncated,
-                )
-            )
-        return group
+        """对一道题采样 G 条回答并计算奖励（单题入口）。"""
+        return self._rollout_groups([(question, ground_truth)])[0]
 
-    def collect_batch(self) -> RolloutBuffer:
-        buffer = RolloutBuffer()
-        for _ in range(self.prompts_per_batch):
+    def _next_items(self, count: int) -> list[tuple[str, str]]:
+        """按数据顺序取 count 道题，并推进游标。"""
+        items: list[tuple[str, str]] = []
+        for _ in range(count):
             position = self._cursor % len(self.problems)
             index = self._order[position] if self._order is not None else position
-            question, ground_truth = self.problems[index]
+            items.append(self.problems[index])
             self._cursor += 1
-            buffer.add_group(self.rollout_group(question, ground_truth))
-        return buffer
+        return items
 
-    def _old_and_ref_log_probs(self, buffer: RolloutBuffer) -> dict:
+    def _rollout_groups(self, items: Sequence[tuple[str, str]]) -> list[PromptGroup]:
+        """对多道题采样；多题时合并成一次批量解码（P1）。
+
+        批量生成只影响速度，不改变采样分布：每题仍独立采 G 条回答。
+        """
+        prompts = [build_prompt(question, self.tokenizer) for question, _ in items]
+        if len(prompts) == 1:
+            outputs_list = [self.generator.generate(prompts[0], self.sampling)]
+        elif hasattr(self.generator, "generate_batch"):
+            outputs_list = self.generator.generate_batch(prompts, self.sampling)
+        else:
+            outputs_list = [
+                self.generator.generate(prompt, self.sampling) for prompt in prompts
+            ]
+
+        groups: list[PromptGroup] = []
+        for (question, ground_truth), prompt, outputs in zip(items, prompts, outputs_list):
+            group = PromptGroup(
+                prompt_ids=outputs[0].prompt_ids,
+                prompt_text=prompt,
+                question=question,
+                ground_truth=ground_truth,
+            )
+            for output in outputs:
+                result = compute_reward(
+                    output.response_text, ground_truth, config=self.reward_config
+                )
+                group.add_sample(
+                    RolloutSample(
+                        response_ids=output.response_ids,
+                        response_text=output.response_text,
+                        reward=result.reward,
+                        correct=result.correct,
+                        truncated=output.truncated,
+                    )
+                )
+            groups.append(group)
+        return groups
+
+    def _old_and_ref_log_probs(self, buffer: RolloutBuffer, need_ref: bool = True) -> dict:
         pad_token_id = self.tokenizer.pad_token_id
         batch = buffer.to_batch(pad_token_id=pad_token_id if pad_token_id is not None else 0)
         input_ids = batch["input_ids"].to(self.device)
@@ -232,7 +259,9 @@ class GRPOTrainer:
             )
             batch["old_log_probs"] = old_log_probs.float().cpu()
             batch["policy_entropy"] = policy_entropy.float().cpu()
-            if self.ref_model is not None:
+            if not need_ref:
+                pass
+            elif self.ref_model is not None:
                 batch["ref_log_probs"] = aligned_token_log_probs(
                     self.ref_model, input_ids, attention_mask
                 ).float().cpu()
@@ -242,16 +271,21 @@ class GRPOTrainer:
                     batch["ref_log_probs"] = aligned_token_log_probs(
                         self.model, input_ids, attention_mask
                     ).float().cpu()
+            else:
+                batch["ref_log_probs"] = None
         self.model.train()
         return batch
 
-    def _micro_step(self) -> dict:
-        """采样一个 micro-batch、算损失并反传梯度（不更新参数）。
+    def _update_micro_batch(self, groups: Sequence[PromptGroup]) -> dict:
+        """对一个 micro-batch 算损失并反传梯度（不更新参数）。
 
-        返回原始数值，由 train_step 汇总成一个优化步的指标。
+        打开 ``skip_zero_gradient_steps`` 时，若本组所有题的优势都为 0，
+        损失对参数的梯度恒为 0，跳过策略前向与反传（P2）；仍做一次
+        inference 前向以保留熵等诊断指标。
         """
-        buffer = self.collect_batch()
-        batch = self._old_and_ref_log_probs(buffer)
+        buffer = RolloutBuffer()
+        for group in groups:
+            buffer.add_group(group)
 
         rewards = buffer.rewards()
         group_count = buffer.num_groups
@@ -260,9 +294,28 @@ class GRPOTrainer:
         advantage_result = compute_group_advantages(
             rewards.view(group_count, self.num_generations), self.num_generations
         )
-        advantages = advantage_result.advantages.reshape(-1)
+        zero_variance = advantage_result.zero_variance.detach().cpu()
+        skip = self.skip_zero_gradient_steps and bool(zero_variance.all())
 
+        batch = self._old_and_ref_log_probs(buffer, need_ref=not skip)
         mask = batch["response_mask"].to(self.device)
+        entropy = batch["policy_entropy"].to(self.device)
+        result = {
+            "loss_dict": None,
+            "rewards": rewards.tolist(),
+            "zero_variance": zero_variance,
+            "num_response_tokens": float(mask.sum()),
+            # 熵按 response token 数加权平均，不能简单对 micro-batch 的均值再平均
+            "entropy_sum": float((entropy * mask).sum()),
+            "entropy_count": float(mask.sum()),
+            "avg_length": float(batch["response_lengths"].float().mean()),
+            "truncation": float(batch["truncated"].float().mean()),
+            "skipped": skip,
+        }
+        if skip:
+            return result
+
+        advantages = advantage_result.advantages.reshape(-1)
         # 训练前向必须建图，用分块版本：整份 [N, L, V] 的 fp32 log_softmax
         # 加 gather 反向梯度约 4 GB，长回答步会 OOM（见 rollout 里的说明）。
         policy_log_probs = chunked_aligned_token_log_probs(
@@ -285,27 +338,28 @@ class GRPOTrainer:
 
         # 除以累积步数：多轮梯度相加后 = 一个等效大 batch 的平均梯度
         (output.loss / self.grad_accum_steps).backward()
-
-        entropy = batch["policy_entropy"].to(self.device)
-        return {
-            "loss_dict": output.as_dict(),
-            "rewards": rewards.tolist(),
-            "zero_variance": advantage_result.zero_variance.detach().cpu(),
-            # 熵按 response token 数加权平均，不能简单对 micro-batch 的均值再平均
-            "entropy_sum": float((entropy * mask).sum()),
-            "entropy_count": float(mask.sum()),
-            "avg_length": float(batch["response_lengths"].float().mean()),
-            "truncation": float(batch["truncated"].float().mean()),
-        }
+        result["loss_dict"] = output.as_dict()
+        return result
 
     def train_step(self) -> dict[str, float]:
-        """一次优化步：grad_accum_steps 个 micro-batch → 一次参数更新。"""
+        """一次优化步：先采样 prompts_per_batch × grad_accum_steps 道题，
+        再切成 micro-batch 逐个前向/反传，最后一次参数更新。
+
+        采样阶段把这些题合并成一次批量解码（P1）；更新阶段显存仍只按
+        ``prompts_per_batch`` 计，12 GB 卡不会因 batch 变大而 OOM。
+        """
         start = time.perf_counter()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
         self.model.train()
 
-        micro_results = [self._micro_step() for _ in range(self.grad_accum_steps)]
+        prompts_per_update = self.prompts_per_batch * self.grad_accum_steps
+        groups = self._rollout_groups(self._next_items(prompts_per_update))
+
+        micro_results: list[dict] = []
+        for offset in range(0, prompts_per_update, self.prompts_per_batch):
+            chunk = groups[offset : offset + self.prompts_per_batch]
+            micro_results.append(self._update_micro_batch(chunk))
 
         grad_norm = torch.nn.utils.clip_grad_norm_(
             [p for p in self.model.parameters() if p.requires_grad], self.max_grad_norm
@@ -316,15 +370,19 @@ class GRPOTrainer:
         self.optimizer.zero_grad(set_to_none=True)
 
         self._step += 1
-        count = len(micro_results)
-
-        # 各 micro-batch 样本数相同，所以这些指标取平均即为整体值
-        metrics = {
-            key: sum(result["loss_dict"][key] for result in micro_results) / count
-            for key in ("loss", "policy_loss", "kl", "clip_fraction", "ratio_mean")
-        }
+        computed = [result for result in micro_results if not result["skipped"]]
+        count = len(computed)
+        metrics: dict[str, float] = {}
+        if count:
+            # 只在真正反传过的 micro-batch 上平均这些指标
+            metrics.update(
+                {
+                    key: sum(result["loss_dict"][key] for result in computed) / count
+                    for key in ("loss", "policy_loss", "kl", "clip_fraction", "ratio_mean")
+                }
+            )
         metrics["num_response_tokens"] = sum(
-            result["loss_dict"]["num_response_tokens"] for result in micro_results
+            result["num_response_tokens"] for result in micro_results
         )
 
         all_rewards = [value for result in micro_results for value in result["rewards"]]
@@ -333,8 +391,10 @@ class GRPOTrainer:
             zero_variance_ratio=float(
                 torch.cat([result["zero_variance"] for result in micro_results]).float().mean()
             ),
-            avg_response_length=sum(result["avg_length"] for result in micro_results) / count,
-            truncation_rate=sum(result["truncation"] for result in micro_results) / count,
+            avg_response_length=sum(result["avg_length"] for result in micro_results)
+            / len(micro_results),
+            truncation_rate=sum(result["truncation"] for result in micro_results)
+            / len(micro_results),
             policy_entropy=(
                 sum(result["entropy_sum"] for result in micro_results)
                 / max(sum(result["entropy_count"] for result in micro_results), 1.0)
@@ -342,6 +402,8 @@ class GRPOTrainer:
             grad_norm=float(grad_norm),
             learning_rate=float(self.optimizer.param_groups[0]["lr"]),
             step_time=time.perf_counter() - start,
+            skipped_micro_batches=float(len(micro_results) - count),
+            skipped_ratio=float(len(micro_results) - count) / len(micro_results),
         )
         if torch.cuda.is_available():
             # 本步真实的张量分配峰值（不含 PyTorch 缓存），

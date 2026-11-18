@@ -17,6 +17,7 @@
 | 冒烟：单步 / 梯度累积 / 断点续训 | ✅ | 续训后指标逐位可复现 |
 | 正式训练 E1（GRPO + LoRA，300 步） | ✅ | 1.87 小时，显存峰值 10.77 GB，无 OOM |
 | 训练后评测 | ✅ | **0.4049**（基线 0.4306，−2.58 点，McNemar p=0.078）；长度 +11 token |
+| E2 实验（4 题 × G=6，500 步，含 P1/P2） | ✅ | 2026-11-18，127.5 分钟、2,000 道题、524 tok/s；**尚未评测**，见 [`experiment_E2_grpo_lora_g6.md`](experiment_E2_grpo_lora_g6.md) |
 | DAPO 对照实验 | ⬜ | 未开始，见第 5 节 |
 
 ---
@@ -72,7 +73,14 @@
    token-level loss / overlong shaping）。建议同样 300 步，与 E1 严格同配置，只差这四个开关。
 3. **加大训练量**：300 步只有 300 道题（占训练集 4%），梯度更新次数太少。
    若预算允许，下一步应优先提高**题目数**而不是调超参。
-4. 可选：换 vLLM 做 rollout（GPU 利用率目前只有 23%），但改造量大。
+4. **训练吞吐**：P1（批量 rollout）与 P2（零梯度跳过）已于 2026-11-18 在 `GRPO/`
+   实现并实测：E2 500 步 127.5 分钟、4.01 M token，吞吐 **524 tok/s**（E1 为 60.2），
+   单位时间产出提升 8.7×；GPU 采样均值 40.5%、峰值 89%。
+   详见 [`experiment_E2_grpo_lora_g6.md`](experiment_E2_grpo_lora_g6.md)、
+   [`perf_optimization_backlog.md`](perf_optimization_backlog.md)、踩坑记录 #33/#34。
+   `src/`（DAPO）路径尚未同步，跑 DAPO 前要先移植。
+5. **E2 待办**：先跑同口径评测（batch=16）拿到 test 准确率，再决定是否作为新的基线；
+   权重已在本地 `outputs/E2_grpo_lora_g6/checkpoints/step_500/`。
 
 ---
 

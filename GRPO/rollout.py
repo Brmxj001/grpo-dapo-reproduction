@@ -289,6 +289,54 @@ def aligned_log_probs_and_entropy(
     return aligned_log_probs, aligned_entropy
 
 
+def _trim_response(
+    response_ids: list[int], eos_token_id: int | None, max_new_tokens: int
+) -> tuple[list[int], bool]:
+    """截到第一个 EOS（含 EOS）；没有 EOS 时判断是否达到生成长度上限。"""
+    if eos_token_id is not None and eos_token_id in response_ids:
+        return response_ids[: response_ids.index(eos_token_id) + 1], False
+    return response_ids, len(response_ids) >= max_new_tokens
+
+
+def split_batched_output(
+    output: torch.Tensor,
+    prompt_texts: Sequence[str],
+    prompt_ids_list: Sequence[Sequence[int]],
+    padded_prompt_length: int,
+    params: SamplingParams,
+    tokenizer,
+) -> list[list[GenerationOutput]]:
+    """把一次批量 generate 的输出按题切开。
+
+    批量生成使用**左 padding**，所以真实 prompt 位于每行
+    ``[padded_prompt_length - prompt_len, padded_prompt_length)``，
+    回答从 ``padded_prompt_length`` 开始。
+    """
+    eos_token_id = getattr(tokenizer, "eos_token_id", None)
+    groups: list[list[GenerationOutput]] = []
+    for index, prompt_text in enumerate(prompt_texts):
+        prompt_ids = list(prompt_ids_list[index])
+        rows: list[GenerationOutput] = []
+        for offset in range(params.num_generations):
+            row = output[index * params.num_generations + offset]
+            response_ids, truncated = _trim_response(
+                row[padded_prompt_length:].tolist(), eos_token_id, params.max_new_tokens
+            )
+            rows.append(
+                GenerationOutput(
+                    prompt_text=prompt_text,
+                    prompt_ids=prompt_ids,
+                    response_ids=response_ids,
+                    response_text=tokenizer.decode(
+                        response_ids, skip_special_tokens=True
+                    ),
+                    truncated=truncated,
+                )
+            )
+        groups.append(rows)
+    return groups
+
+
 class HFGenerator:
     """使用 transformers model.generate 做组内采样。"""
 
@@ -337,12 +385,9 @@ class HFGenerator:
         eos_token_id = self.tokenizer.eos_token_id
         results: list[GenerationOutput] = []
         for row in output:
-            response_ids = row[prompt_length:].tolist()
-            if eos_token_id is not None and eos_token_id in response_ids:
-                response_ids = response_ids[: response_ids.index(eos_token_id) + 1]
-                truncated = False
-            else:
-                truncated = len(response_ids) >= params.max_new_tokens
+            response_ids, truncated = _trim_response(
+                row[prompt_length:].tolist(), eos_token_id, params.max_new_tokens
+            )
             results.append(
                 GenerationOutput(
                     prompt_text=prompt_text,
@@ -355,6 +400,60 @@ class HFGenerator:
                 )
             )
         return results
+
+    def generate_batch(
+        self, prompt_texts: Sequence[str], params: SamplingParams | None = None
+    ) -> list[list[GenerationOutput]]:
+        """为多道题一次性采样，返回与 ``prompt_texts`` 等长的分组列表。
+
+        与逐题调用 ``generate()`` 的采样分布相同，但把 K 道题 × G 条回答
+        放进同一个解码 batch：每个 token 的 kernel 从处理 G 行变成处理 K×G 行，
+        kernel 启动与 Python 循环开销被摊薄（见 docs/perf_optimization_backlog.md P1）。
+
+        使用**左 padding**：右 padding 会让生成从 pad 位置继续写，结果全错。
+        """
+        params = params or self.params
+        if not prompt_texts:
+            return []
+
+        tokenizer = self.tokenizer
+        padding_side = tokenizer.padding_side
+        tokenizer.padding_side = "left"
+        try:
+            encoded = tokenizer(
+                list(prompt_texts),
+                return_tensors="pt",
+                padding=True,
+                add_special_tokens=False,
+            )
+        finally:
+            tokenizer.padding_side = padding_side
+
+        input_ids = encoded["input_ids"].to(self.device)
+        attention_mask = encoded["attention_mask"].to(self.device)
+        prompt_lengths = attention_mask.sum(dim=1).tolist()
+        padded_prompt_length = input_ids.shape[1]
+        prompt_ids_list = [
+            input_ids[index, padded_prompt_length - int(length):].tolist()
+            for index, length in enumerate(prompt_lengths)
+        ]
+
+        generations = params.num_generations
+        with torch.inference_mode():
+            output = self.model.generate(
+                input_ids=input_ids.repeat_interleave(generations, dim=0),
+                attention_mask=attention_mask.repeat_interleave(generations, dim=0),
+                **self._kwargs(params),
+            )
+
+        return split_batched_output(
+            output,
+            prompt_texts,
+            prompt_ids_list,
+            padded_prompt_length,
+            params,
+            tokenizer,
+        )
 
 
 class MockGenerator:
@@ -408,3 +507,9 @@ class MockGenerator:
                 )
             )
         return results
+
+    def generate_batch(
+        self, prompt_texts: Sequence[str], params: SamplingParams | None = None
+    ) -> list[list[GenerationOutput]]:
+        """Mock 版本：逐题返回，接口与 HFGenerator.generate_batch 一致。"""
+        return [self.generate(text, params) for text in prompt_texts]

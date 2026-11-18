@@ -918,6 +918,114 @@ curl/git 走环境变量 `HTTP_PROXY`，Python `requests` 又走另一套。同�
 
 ---
 
+### 33. GPU 利用率只有约 23%：rollout 逐题解码 + 零优势步照常反传
+
+**现象**：
+- E1 300 步：1.87 小时、22.5 s/步、显存峰值 10.77 / 11.63 GB，但 `nvidia-smi` 抽查
+  GPU 利用率约 **23%**；
+- 从 metrics 反推吞吐：405,739 response token ÷ 1.872 h = **60.2 token/s**。
+  0.5B bf16 权重只有约 1 GB，3080 Ti 带宽 912 GB/s，单条序列理论上限约 900 token/s；
+- `zero_variance_ratio` 均值 **0.53**：这些步梯度恒为 0，却照常跑完两次额外前向 + 反传。
+
+**分析（排除了什么）**：
+- 不是模型太大：0.5B 权重约 1 GB，瓶颈在 **batch 太小**，不在参数规模；
+- 不是显存不够：显存确实贴顶，但那是 `[N, L, V]` 的 log-prob 中间量（V=151936），
+  与算力闲置是两回事；
+- 不是数据加载：单步 22.5 s 且随回答长度变化，rollout 占主导。
+  （当时没有分段计时，这是观测缺口 —— 后来补的改造里应同时记录。）
+- 结构原因：`collect_batch` 对每道题单独调 `generate`，解码 batch 恒为 G=4；
+  一个优化步要串行调用 4 次，kernel 启动和逐 token 的 Python 开销占主导。
+- 卡数确认：实例实际只有 **GPU 0** 一张卡（11.63 GiB）。`80 vCPU` 是 AutoDL
+  宿主机规格，不代表实例分到了 8 张卡；以 `nvidia-smi -L` /
+  `torch.cuda.device_count()` 为准。
+
+**尝试（失败的路）**：
+- 直接 `prompts_per_batch=4 × num_generations=6`（N=24）一次前向：
+  log-prob 的 fp32 中间量按 N 线性增长，N=4 已约 2 GB，N=24 约 12 GB，12 GB 卡必 OOM；
+- vLLM 替换 rollout：vLLM 预分配 KV cache，与训练峰值 10.8 GB 无法在 12 GB 上共驻；
+  LoRA 每个更新步都要热更新权重；且 batch 只有 24 时连续批处理收益约 1.5–2×，
+  改造要几天 → 暂缓（多卡/大 batch 时才值得）；
+- 换 24 GB 卡：只提高算力和带宽，N=24 的中间量仍要拆 micro-batch，不是根本解法。
+
+**最终方案**（2026-11-18 实现于 `GRPO/`，细节见
+[`perf_optimization_backlog.md`](perf_optimization_backlog.md)）：
+1. **P1 批量 rollout**：`HFGenerator.generate_batch()` 把 K 道题的 K×G 条序列
+   **左 padding** 拼成一个 batch 解码，`split_batched_output()` 按题切回；
+   训练改为"一个优化步先采 `prompts_per_batch × grad_accum_steps` 道题 →
+   切 micro-batch 反传"，显存仍只按 `prompts_per_batch` 计；
+2. **P2 跳过零梯度步**：`training.skip_zero_gradient_steps=true` 时，组内优势全 0 的
+   micro-batch 只做一次 inference 前向保留熵，跳过 ref 前向和策略前向/反传；
+   loss/kl 等指标不伪造，改记 `skipped_micro_batches` / `skipped_ratio`；
+3. 新增 4 个 CPU 测试：左 padding 切分、Mock 批量与单题一致、梯度累积消费多题、
+   零优势跳过且参数不变。
+
+**验证**：
+- `tests/test_grpo_standalone.py` 9/9 通过（整套 5 个测试文件全通过）；
+- 用本地 `models/Qwen2.5-0.5B-Instruct` 在 CPU 上跑真实 `generate_batch`
+  （2 道不等长题 × G=2，贪婪解码）：切回后的 `prompt_ids` 与 `tokenizer.encode`
+  逐 token 一致，无 pad 混入回答，回答非空 —— 左 padding 路径确认真实可用；
+- GPU 上的实际提速待 smoke 实测（预期 rollout 2–4×，整体 3–6×）。
+
+**经验**：
+- 小 batch 解码是 kernel 启动/访存 bound，不是 FLOPs bound；加 batch 往往比换卡更有效；
+- 优化前先补**分段计时 + 利用率采样**，否则只能靠猜；
+- 批量生成必须左 padding：右 padding 会让生成从 pad 位置继续写（评测脚本也栽过，见 #19）；
+- 零优势步梯度严格为 0（策略项 A=0，KL 项对 log-prob 的导数抵消），跳过不改变参数轨迹；
+- 先 `nvidia-smi -L` 确认卡数，别把宿主机规格当成实例规格。
+
+---
+
+### 34. 标称 vGPU-32GB 实际是 24 GB，且 N=12 仍 OOM：Qwen2 的 logits 是 fp32
+
+**现象**：
+- AutoDL 商品写「vGPU-32GB / 32 GB」，登进去 `nvidia-smi -L` 显示
+  **RTX 4090 D，24564 MiB（23.5 GiB）**，驱动 580.105.08，cgroup 限 16 核 / 80 GB 内存；
+- 按 `prompts_per_batch=2 × G=6`（N=12）跑 3 步冒烟，第 1 步就在分块 `log_softmax`
+  处 OOM：PyTorch 已分配 **22.3 GiB**，只差 446 MiB 就放不下一个 `[12,64,151936]` 的 chunk；
+- 改成 `prompts_per_batch=1`（N=6）后分配峰值 13.96 GB，但 `nvidia-smi` 峰值 **22.0 GB**，
+  离 23.5 GiB 上限很近。
+
+**分析（排除了什么）**：
+- 不是模型权重：0.5B bf16 约 1 GB；
+- 不是 LoRA/优化器：可训练参数 8.8 M，优化器状态约 100 MB；
+- 不是分块失效：分块本来就只省中间量；
+- 真正原因：transformers 的 `Qwen2ForCausalLM` 会把 lm_head 输出 **转成 fp32**
+  （原实现如此）。`[N, L, V=151936]` 单份大小 = N×L×151936×4 B；
+  N=12、L≈700 时约 **5 GB**，而反向必须同时保留三份 ——
+  前向 logits、分块 `log_softmax` 输出、logits 的梯度 —— 约 15 GB，
+  再加激活与 KV 直接把 24 GB 吃穿。N=6 时三份约 7.5 GB，安全。
+- 结论：显存随 micro-batch 线性增长，且**系数由 V=151936 的 fp32 logits 决定**，
+  不是"24 GB 就能随便开 N=12"。
+
+**尝试（失败的路）**：
+- `prompts_per_batch=2`（N=12）在 23.5 GiB 上 OOM，见上；
+- 调小 `chunk_size` 无用：省的是 chunk 中间量，整份 logits 前向输出无法释放；
+- 改 bf16 logits 需要改 transformers 实现/自写 lm_head，会改变数值，与 E1 不可比 → 不做。
+
+**最终方案**：
+1. `configs/grpo_lora_g6.yaml`：`prompts_per_batch: 1` + `grad_accum_steps: 4`，
+   一个优化步仍是 4 道题；**P1 批量 rollout 不受影响**（4 道题 × G=6 一次性解码），
+   只是反传按 1 道题切 4 次；
+2. 必加 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`：
+   `nvidia-smi` 峰值从 22.0 GB 降到 **15.15 GB**，步时也略降。
+
+**验证**（3 步冒烟，G=6、max_new_tokens=512）：
+- step 1：17.0 s，分配 13.96 GB，`zero_variance_ratio=0`；
+- step 2：14.0 s，跳过 3/4 micro-batch；
+- step 3：13.7 s，4/4 全跳过（`grad_norm=0`，无 loss）；
+- 吞吐：约 **500–750 response token/s**，对比 E1 的 60.2 token/s 约 10 倍；
+- `nvidia-smi` 采样：利用率中位数 40%、p90 44%、峰值 97%（模型加载/反向瞬时），
+  显存峰值 15.15 GB。
+
+**经验**：
+- 商品页的 "vGPU-32GB" 不等于 `nvidia-smi` 看到的显存，**先 `nvidia-smi -L` 再定 batch**；
+- 大词表模型（V≈15 万）的显存主项是 `[N,L,V]` fp32 logits，估显存先算这一项，
+  不能只看参数量；
+- `expandable_segments:True` 对"分配 14 GB、预留 22 GB"的碎片问题非常有效，
+  应作为默认开启项。
+
+---
+
 ## 指标判读指南（哪些"看起来不对"其实是正常的）
 
 训练早期几类"异常"数字，实测确认都是设计使然，不要误判成 bug：
@@ -930,6 +1038,7 @@ curl/git 走环境变量 `HTTP_PROXY`，Python `requests` 又走另一套。同�
 | 第 2 步起 `reward_mean=0` | 基座模型本身在多数 GSM8K 题上就是 0/4 全错。实测对照：题目 0 基座奖励 `[1,0,1,1]`（0.75），与 LoRA 训练第 1 步完全一致；题目 2/4 基座为 0/4。B=1、G=4 时奖励方差极大，需看滑动平均而非单步。 |
 | `zero_variance_ratio=1.0` | 该步 4 条回答奖励全相同，优势全为 0，这一步不产生学习信号。vanilla GRPO 没有动态采样，这类步会白白浪费；DAPO 的 dynamic sampling 正是为此设计。 |
 | **`loss` 300 步几乎不动（0.003 上下）** | GRPO 的 loss = `policy_loss + β·kl`。组内优势零均值，且起始时 `ratio≈1`，所以 `policy_loss≈0` 是**数学必然**；剩下的 `β·kl = 0.04×0.085 ≈ 0.0034` 就是实测的 0.0035。它是"约束记账"，**不是进度条**。判断好坏请看 `reward_mean`（升）和 `grad_norm`（非零），而不是 loss 下降。 |
+| `skipped_ratio > 0` 且该步没有 `loss`/`kl` | 打开了 `skip_zero_gradient_steps`：组内优势全 0 的 micro-batch 被跳过反传，因此不产生梯度指标；`reward`/`policy_entropy`/长度仍会记录。`grad_norm=0` 是预期值。 |
 
 ---
 
@@ -963,3 +1072,5 @@ curl/git 走环境变量 `HTTP_PROXY`，Python `requests` 又走另一套。同�
 - [x] 训练后评测：0.4049 vs 基线 0.4306（−2.58 点，McNemar p=0.078），长度 +11 token
 - [ ] DAPO 对照实验（同预算 300 步，只差四个开关）
 - [ ] 扩大训练量：300 步只用了 4% 训练集，下一步优先加题目数
+- [x] P1/P2 吞吐改造（`GRPO/` 路径），CPU 测试通过；GPU 实际提速待 smoke 实测
+- [ ] 把 P1/P2 移植到 `src/`（DAPO 路径），注意 dynamic sampling 的重采逻辑

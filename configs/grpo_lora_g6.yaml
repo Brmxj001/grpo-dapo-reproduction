@@ -1,0 +1,28 @@
+# E2：GRPO + LoRA，每优化步 4 道题 × 每题 6 采样（24 条 rollout）
+# 面向 24 GB 卡（RTX 4090 D 实测 23.5 GiB），并启用 P1/P2：
+#   P1 批量 rollout：一个优化步先把 4 道题一起批量解码，再切 micro-batch 反传；
+#   P2 零梯度跳过：组内优势全 0 的 micro-batch 不反传（仍记录奖励/熵）。
+
+defaults:
+  - grpo_lora.yaml
+
+experiment:
+  id: E2
+  name: grpo_lora_g6
+  description: GRPO + LoRA，4 题 × G=6 / 步，批量 rollout + 零梯度跳过
+
+rollout:
+  num_generations: 6
+
+training:
+  # 显存只按 micro-batch 计：1 题 × 6 = 6 条序列（N=6）。
+  # 实测 2026-11-18：N=12、L≈700、max_new_tokens=512 在 23.5 GiB 的
+  # RTX 4090 D 上 OOM —— Qwen2 的 LM head 会把 logits 转 fp32，
+  # 单份 [12,700,151936] 约 5 GB，前向输出/分块输出/反向梯度三份叠加即 15 GB。
+  prompts_per_batch: 1
+  # 每优化步 = 1 × 4 = 4 道题，与实验设计一致；rollout 仍是 4 题一次性批量解码。
+  grad_accum_steps: 4
+  skip_zero_gradient_steps: true
+  # E1 里 53% 的步零方差；跳过反传后单步耗时波动变大，检查点不宜太稀。
+  save_every: 10
+  output_dir: outputs/E2_grpo_lora_g6

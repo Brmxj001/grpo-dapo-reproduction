@@ -46,13 +46,17 @@ python scripts/run_tests.py
 
 | 项 | 要求 | 实测 |
 |---|---|---|
-| GPU | ≥ 12 GB 显存 | RTX 3080 Ti 12288 MiB，驱动 595.71.05 |
+| GPU | ≥ 12 GB 显存；24 GB 更宽松 | RTX 3080 Ti 12288 MiB（驱动 595.71.05）；RTX 4090 D 24564 MiB（驱动 580.105.08） |
 | 系统 | Ubuntu 22.04（AutoDL 默认 PyTorch 镜像） | Ubuntu 22.04.5，内核 5.15 |
 | 数据盘 | ≥ 10 GB | `/root/autodl-tmp` 50 GB（项目放这里） |
 | Python | 3.10+ | 3.12.3（miniconda base，conda 24.4.0） |
 | 全参微调 | **不要在 12 GB 卡上做** | 实测差 1.39 GiB OOM，需 16–24 GB |
 
 > AutoDL 系统盘 30 GB 也够用，但项目、模型、检查点一律放 `/root/autodl-tmp`。
+>
+> 24 GB 卡上 micro-batch 仍建议 **1 题**：Qwen2 的 lm_head 输出 fp32 logits，
+> N=12 × L≈700 时三份 logits 就约 15 GB，实测 OOM（踩坑 #34）。
+> 多题并行靠 `grad_accum_steps` 和 P1 批量 rollout，不靠加大 micro-batch。
 
 ---
 

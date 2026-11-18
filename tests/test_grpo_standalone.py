@@ -30,6 +30,7 @@ from GRPO.rollout import (  # noqa: E402
     SamplingParams,
     aligned_token_log_probs,
     chunked_aligned_token_log_probs,
+    split_batched_output,
 )
 
 _TINY_MODEL = None
@@ -199,12 +200,148 @@ def test_trainer_one_step():
         trainer.logger.close()
 
 
+def test_split_batched_output():
+    """批量解码结果按题切分：左 padding 偏移、EOS 截断与长度上限。"""
+    tokenizer = FakeTokenizer()
+    params = SamplingParams(num_generations=2, max_new_tokens=3)
+    # 两条 prompt 左 padding 到长度 3：p0=[5,6] → [0,5,6]；p1=[7] → [0,0,7]
+    output = torch.tensor(
+        [
+            [0, 5, 6, 10, 11, 1],   # p0 / 回答 10,11,EOS
+            [0, 5, 6, 12, 13, 14],  # p0 / 无 EOS，达到 3 token → 截断
+            [0, 0, 7, 15, 1, 0],    # p1 / 回答 15,EOS
+            [0, 0, 7, 16, 17, 18],  # p1 / 无 EOS，截断
+        ]
+    )
+    groups = split_batched_output(
+        output,
+        prompt_texts=["p0", "p1"],
+        prompt_ids_list=[[5, 6], [7]],
+        padded_prompt_length=3,
+        params=params,
+        tokenizer=tokenizer,
+    )
+    assert [group[0].prompt_ids for group in groups] == [[5, 6], [7]]
+    assert groups[0][0].response_ids == [10, 11, 1]
+    assert groups[0][0].truncated is False
+    assert groups[0][1].response_ids == [12, 13, 14]
+    assert groups[0][1].truncated is True
+    assert groups[1][0].response_ids == [15, 1]
+    assert groups[1][0].prompt_ids == [7]
+    assert groups[1][1].truncated is True
+
+
+def test_mock_generate_batch_matches_single():
+    tokenizer = FakeTokenizer()
+    params = SamplingParams(num_generations=2)
+    generator = MockGenerator(
+        responses=["\\boxed{72}", "I am not sure."],
+        tokenizer=tokenizer,
+        params=params,
+    )
+    batched = generator.generate_batch(["p0", "p1", "p2"])
+    assert len(batched) == 3
+    for index, prompt in enumerate(["p0", "p1", "p2"]):
+        single = generator.generate(prompt)
+        assert [item.response_text for item in batched[index]] == [
+            item.response_text for item in single
+        ]
+        assert [item.prompt_ids for item in batched[index]] == [
+            item.prompt_ids for item in single
+        ]
+
+
+def _trainer_config(output_dir: str, **training) -> dict:
+    config = {
+        "seed": 0,
+        "model": {"device": "cpu"},
+        "data": {"train_file": "data/processed/gsm8k/train.parquet"},
+        "rollout": {"num_generations": 2, "max_new_tokens": 32},
+        "training": {
+            "learning_rate": 1e-3,
+            "max_steps": 1,
+            "prompts_per_batch": 1,
+            "grad_accum_steps": 1,
+            "output_dir": output_dir,
+        },
+        "algorithm": {"clip_ratio": 0.2, "kl_coef": 0.0},
+        "reward": {"correct_reward": 1.0, "incorrect_reward": 0.0},
+    }
+    config["training"].update(training)
+    return config
+
+
+def test_trainer_grad_accum_batches_rollout():
+    """grad_accum_steps=2 时，一个优化步消费 2 道题、产生 2 个 micro-batch。"""
+    from GRPO.trainer import GRPOTrainer
+
+    tokenizer = FakeTokenizer()
+    generator = MockGenerator(
+        responses=["\\boxed{72}", "I am not sure."],
+        tokenizer=tokenizer,
+        params=SamplingParams(num_generations=2),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        config = _trainer_config(
+            str(Path(directory) / "run"), grad_accum_steps=2
+        )
+        trainer = GRPOTrainer(
+            config, model=_tiny_model(), tokenizer=tokenizer, generator=generator
+        )
+        metrics = trainer.train_step()
+        assert trainer._cursor == 2, "一个优化步应消费 prompts_per_batch × grad_accum_steps 道题"
+        assert metrics["skipped_ratio"] == 0.0
+        assert math.isfinite(metrics["loss"])
+        assert metrics["num_response_tokens"] > 0
+        trainer.logger.close()
+
+
+def test_trainer_skips_zero_gradient_step():
+    """零优势步：不反传、参数不变，但奖励/熵等诊断指标仍然记录。"""
+    import copy
+
+    from GRPO.trainer import GRPOTrainer
+
+    tokenizer = FakeTokenizer()
+    model = copy.deepcopy(_tiny_model())
+    # 两条回答都对（第一题答案为 72）→ 组内奖励相同 → 优势全 0
+    generator = MockGenerator(
+        responses=["\\boxed{72}"],
+        tokenizer=tokenizer,
+        params=SamplingParams(num_generations=2),
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        config = _trainer_config(
+            str(Path(directory) / "run"), skip_zero_gradient_steps=True
+        )
+        trainer = GRPOTrainer(
+            config, model=model, tokenizer=tokenizer, generator=generator
+        )
+        before = [parameter.detach().clone() for parameter in model.parameters()]
+        metrics = trainer.train_step()
+        after = [parameter.detach() for parameter in model.parameters()]
+
+        assert metrics["skipped_ratio"] == 1.0
+        assert metrics["skipped_micro_batches"] == 1.0
+        assert "loss" not in metrics, "跳过的步不应伪造 loss"
+        assert metrics["grad_norm"] == 0.0
+        assert math.isfinite(metrics["policy_entropy"])
+        assert all(
+            torch.equal(old, new) for old, new in zip(before, after)
+        ), "零梯度步不应改变参数"
+        trainer.logger.close()
+
+
 TESTS = [
     ("advantage: 手算组内优势", test_advantage_manual),
     ("loss: sequence/token 与 KL", test_loss_manual),
     ("rollout: Buffer 对齐与 log prob", test_buffer_and_log_probs),
     ("metrics: 日志与奖励统计", test_metrics_logger),
     ("trainer: 微型模型单步更新", test_trainer_one_step),
+    ("rollout: 批量解码按题切分", test_split_batched_output),
+    ("rollout: Mock 批量生成与单题一致", test_mock_generate_batch_matches_single),
+    ("trainer: 梯度累积消费多道题", test_trainer_grad_accum_batches_rollout),
+    ("trainer: 零优势步跳过反传", test_trainer_skips_zero_gradient_step),
 ]
 
 
