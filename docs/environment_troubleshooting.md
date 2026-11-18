@@ -1055,6 +1055,46 @@ curl/git 走环境变量 `HTTP_PROXY`，Python `requests` 又走另一套。同�
 
 ---
 
+### 36. GitHub Release 上传：代理上行超时，`uploads.github.com` 的 DNS 被污染
+
+**现象**：
+- 发布 E2 权重（36.6 MB）时，`curl` 走本地 HTTP 代理（127.0.0.1:7890）POST 到
+  `uploads.github.com`：多次在 2–15 分钟后报
+  `Send failure: Connection was aborted`、`schannel: timed out sending data (bytes sent: 0)`，
+  或 GitHub 返回 `408 Upload body timed out due to inactivity`；
+- 换成 SOCKS5（127.0.0.1:7891）、Python urllib（OpenSSL）、HTTP/1.1、禁用 Expect 均失败；
+- 但 6 字节的探针文件能上传成功，1 MB 就超时。
+
+**分析（排除了什么）**：
+- 不是权限/token：同一 token 能创建 release、能上传小文件；
+- 不是 GitHub 服务端：小文件 201；大文件连"收到多少字节"都是 0，说明数据没出本地；
+- 是**代理上行通道**对大请求不可用（下行正常，HF 模型下载、git push 都正常）；
+- 另外 `uploads.github.com` 的 DNS 在直连时解析失败（`Could not resolve host`），
+  而 `api.github.com` 直连返回 200 —— 典型的 DNS 污染，且只针对部分域名。
+
+**尝试（失败的路）**：
+- HTTP 代理重试、`--http1.1`、`-H "Expect:"`、`--resolve` 之外的变体：全部 0 字节超时；
+- SOCKS5 代理：900 秒后同样 `bytes sent: 0`；
+- Python `urllib` + 代理（OpenSSL，绕开 Windows Schannel）：`WinError 10053` 连接被中止。
+
+**最终方案**：
+1. 用 DoH 查真实 IP：
+   `curl -x 127.0.0.1:7890 "https://dns.google/resolve?name=uploads.github.com&type=A"`
+   → `alambic-origin.githubusercontent.com` / `20.205.243.161`；
+2. 直连该 IP，绕过 DNS 与代理：
+   `curl --resolve uploads.github.com:443:20.205.243.161 -X POST ...`
+   —— 36.6 MB 用 245 秒上传成功（约 150 KB/s）；
+3. 失败的上传会在 Release 里留下 `state: starter` 的占位资产，需用
+   `DELETE /repos/{owner}/{repo}/releases/assets/{id}` 清理，否则同名上传会冲突。
+
+**经验**：
+- 代理"能下载"不等于"能上传"；排查上传问题先传一个 6 字节小文件，再逐级加大小；
+- 域名解析失败 + 其他域名正常 = 优先怀疑 DNS 污染，DoH 查 IP + `--resolve` 是通用解法；
+- GitHub API 的未认证请求按出口 IP 限流，走代理时容易撞 403（`API rate limit exceeded`），
+  一律带 `Authorization: Bearer <token>`。
+
+---
+
 ## 指标判读指南（哪些"看起来不对"其实是正常的）
 
 训练早期几类"异常"数字，实测确认都是设计使然，不要误判成 bug：
