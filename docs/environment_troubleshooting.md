@@ -1026,6 +1026,35 @@ curl/git 走环境变量 `HTTP_PROXY`，Python `requests` 又走另一套。同�
 
 ---
 
+### 35. 云机运维三个小坑：WSL /tmp、pkill 自匹配、`&` 的优先级
+
+**现象**：
+- 在 WSL 里建 `/tmp/askpass.sh` 传 SSH 密码，第一次成功，下一次 `wsl -e bash -lc`
+  报 `exec(/tmp/askpass.sh): No such file or directory`；
+- 远端执行 `pkill -f train_grpo_standalone` 后，当前这条 SSH 直接退出、返回 255，
+  看起来像"连接被断开"；
+- `ssh host "cd proj && nvidia-smi ... > util.csv & ; python scripts/train.py"`
+  报 `can't open file '/root/scripts/train.py'`。
+
+**分析**：
+- WSL 的 `/tmp` 是 tmpfs，WSL 发行版空闲关停后内容清空；跨多次 `wsl -e` 调用不可靠。
+- `pkill -f` 匹配的是完整命令行，而执行命令的 `bash -c` 命令行里就含
+  `train_grpo_standalone` 这个字符串 —— 于是它把自己杀了。
+- shell 里 `&` 的优先级低于 `&&`：`A && B & C` 等价于 `(A && B) &` 再执行 `C`，
+  `cd` 被一起放进后台，前台命令还在原目录。
+
+**最终方案**：
+- askpass 脚本放 `~/.askpass.sh`（家目录持久），用完 `rm`；
+- 杀训练进程用括号技巧 `pgrep -f '[t]rain_grpo_standalone'` / `pkill -f '[t]rain_...'`，
+  或先 `pgrep` 拿 PID 再 kill；
+- 需要后台化时显式分组：`( cd proj && cmd > log 2>&1 ) &`，
+  或把整套流程写成脚本再 `bash script.sh`（本次最后就是这么做的）。
+
+**经验**：无人值守的云机操作尽量"一次写脚本、再执行"，别在 SSH 一行命令里拼
+`&`、`&&`、引号和 `pkill` —— 排错成本远高于写脚本的成本。
+
+---
+
 ## 指标判读指南（哪些"看起来不对"其实是正常的）
 
 训练早期几类"异常"数字，实测确认都是设计使然，不要误判成 bug：
